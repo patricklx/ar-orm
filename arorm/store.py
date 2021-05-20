@@ -1,3 +1,4 @@
+import typing
 from typing import Set, Dict, List, TYPE_CHECKING, TypeVar
 import event_emitter as events
 import gevent.lock
@@ -7,7 +8,7 @@ from .databases.abstract import StoreQuery
 from ..utils import array
 
 if TYPE_CHECKING:
-    from orm import Model, ORM
+    from arorm import Model, ORM
 
 T = TypeVar('T')
 
@@ -52,8 +53,13 @@ class Store:
         if value: return value
         return self.query(type).get(id)
 
+    def create(self, model: typing.Type[T], data=None) -> T:
+        data = data or {}
+        d = model(data=data)
+        return self.add(d)
+
     def add(self, entity: 'Model'):
-        from orm import ReferenceId, Reference
+        from arorm import ReferenceId, Reference
         if entity.full_id in self._cache:
             if self._cache[entity.full_id] == entity:
                 return self._cache[entity.full_id]
