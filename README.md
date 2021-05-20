@@ -41,6 +41,8 @@ book.co_authors.append(user)
 
 store.query(User).filter(User.name == 'admin').delete() # queued to be executed on commit
 
+store.run_after_commit(lambda: print('did commit'))
+
 store.commit()
 
 user.to_json() # -> will now have _id, _rev
