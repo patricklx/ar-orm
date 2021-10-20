@@ -46,11 +46,12 @@ class FieldMeta(type):
                 obj._name = obj_name
             if 'ReferenceList' in globals() and isinstance(obj, ReferenceList):
                 obj._name = obj_name
+            if 'RemoteReference' in globals() and isinstance(obj, RemoteReference):
+                obj._name = obj_name
             if 'ModelProperty' in globals() and isinstance(obj, ModelProperty):
                 new_fields[obj_name] = obj
                 obj._name = obj_name
-                new_attrs[obj_name] = ModelPropertyAccessor()
-                new_attrs[obj_name]._fields = new_fields[obj_name]._fields
+                new_attrs[obj_name] = ModelPropertyAccessor(new_fields[obj_name]._fields)
                 new_attrs[obj_name]._name = obj_name
                 new_attrs[obj_name].kwargs = obj.kwargs
                 new_attrs[obj_name].__impl__ = obj.__class__
@@ -74,6 +75,8 @@ class FieldMeta(type):
             if 'ModelProperty' in globals() and isinstance(obj, ModelProperty):
                 obj._name = obj_name
 
+        for f,v in new_class._fields.items():
+             setattr(v, '_property_path_parent', new_class)
         return new_class
 
 
@@ -81,26 +84,30 @@ class Filterable:
     _name: str
 
     def __eq__(self, b):
-        return Filter(name=self._name, op='eq', var=b)
+        return Filter(name=self.get_property_path(), op='eq', var=b)
 
     def __le__(self, b):
-        return Filter(name=self._name, op='le', var=b)
+        return Filter(name=self.get_property_path(), op='le', var=b)
 
     def __ge__(self, b):
-        return Filter(name=self._name, op='ge', var=b)
+        return Filter(name=self.get_property_path(), op='ge', var=b)
 
     def __lt__(self, b):
-        return Filter(name=self._name, op='lt', var=b)
+        return Filter(name=self.get_property_path(), op='lt', var=b)
 
     def __gt__(self, b):
-        return Filter(name=self._name, op='gt', var=b)
+        return Filter(name=self.get_property_path(), op='gt', var=b)
+
+    def __contains__(self, b):
+        raise Exception ('does not make sense')
 
     @property
     def not_(self):
         def __in(x):
-            return self.in_(self, x, False)
-        o = object()
-        o._in = __in
+            return self.in_(x, False)
+        class Obj(object): pass
+        o = Obj()
+        o.in_ = __in
         return o
 
     @property
@@ -108,17 +115,23 @@ class Filterable:
         class Obj:
             @staticmethod
             def __eq__(b):
-                return Filter(name=self._name, op='len_eq', var=b)
+                return Filter(name=self.get_property_path(), op='len_eq', var=b)
         return Obj()
 
     def in_(self, b, is_in=True):
-        return Filter(name=self._name, op='in_', var=(b, is_in))
+        return Filter(name=self.get_property_path(), op='in_', var=(b, is_in))
 
     def contains_(self, b, is_in=True):
-        return Filter(name=self._name, op='contains_', var=(b, is_in))
+        return Filter(name=self.get_property_path(), op='contains_', var=(b, is_in))
+
+    def get_property_path(self):
+        if hasattr(self, '_property_path_parent'):
+            if hasattr (self._property_path_parent, 'get_property_path'):
+                return self._property_path_parent.get_property_path() + '.' + self._name
+        return self._name
 
     def has_prop(self, name, value):
-        return Filter(name=self._name, op='has_prop', var=(name, value))
+        return Filter(name=self.get_property_path(), op='has_prop', var=(name, value))
 
 
 class Field(Filterable):
@@ -145,13 +158,15 @@ class Field(Filterable):
         if v is not None:
             return v
         if hasattr(self, 'default'):
+            if callable(self.default):
+                return self.default()
             return copy.copy(self.default)
         return None
 
     def __set__(self, obj: 'Model', value: Any) -> None:
         obj._data[self._name] = value
         if not hasattr(obj, '_dirty'): return # e.g. not in store yet
-        if hasattr(obj, '_property_key'):
+        if hasattr(obj, '_property_key') and obj._property_key is not None:
             obj._dirty.add(obj._property_key + '.' + self._name)
         else:
             obj._dirty.add(self._name)
@@ -174,7 +189,7 @@ class RemoteReferenceList:
     def __get__(self, obj: 'Model', owner=None) -> Any:
         if not obj: return self.ref_field
         if self._name not in obj._ref_vals:
-            obj._ref_vals[self._name] = obj._store.query(self.model).filter(f'{self.ref_field}=={obj.id}').all()
+            obj._ref_vals[self._name] = obj._store.query(self.model).filter(f'{self.ref_field}=="{obj.id}"').all()
         return obj._ref_vals[self._name]
 
 
@@ -182,9 +197,10 @@ class RemoteReference:
     _name: str
     ref_field: str
 
-    def __init__(self, ref: str, model: Union[Type['Model'], str]):
+    def __init__(self, ref: str, model: Union[Type['Model'], str], use_full_id=False):
         self.ref_field = ref
         self._model = model
+        self.use_full_id = use_full_id
 
     @property
     def model(self) -> 'Model':
@@ -195,7 +211,8 @@ class RemoteReference:
     def __get__(self, obj: 'Model', owner=None) -> Any:
         if not obj: return self.ref_field
         if self._name not in obj._ref_vals:
-            obj._ref_vals[self._name] = obj._store.query(self.model).filter(f'{self.ref_field}=={obj.id}').one()
+            ref_id = self.use_full_id and obj.full_id or obj.id
+            obj._ref_vals[self._name] = obj._store.query(self.model).filter(f'{self.ref_field}=="{ref_id}"').one()
         return obj._ref_vals[self._name]
 
     def __set__(self, obj: 'Model', value: 'Model') -> None:
@@ -241,7 +258,7 @@ class Reference:
     def get_model_from_id(self, obj):
         name = obj._data[self.ref_field._name].split("/")[0]
         name = inflection.singularize(name)
-        name = name.capitalize()
+        name = ''.join([n.capitalize() for n in name.split('_')])
         return ORM.all_models[name]
 
     def __get__(self, obj: 'Model', owner=None) -> Any:
@@ -274,7 +291,8 @@ class ReferenceIdList(Field):
             return [r.id for r in obj._ref_vals[self.ref_name]]
         l = super(ReferenceIdList, self).__get__(obj, objtype)
         if not l:
-            super(ReferenceIdList, self).__set__(obj, [])
+            obj._data[self._name] = []
+            #super(ReferenceIdList, self).__set__(obj, [])
         return super(ReferenceIdList, self).__get__(obj, objtype)
 
     def __set__(self, obj: 'Model', value: Any) -> None:
@@ -338,14 +356,14 @@ class ReferenceList:
         if obj._data.get(self.ref_field._name, None) is None:
             return []
 
-        obj._ref_vals[self._name] = ReferenceListImpl(self.model.__collection__, obj, self.ref_field)
+        obj._ref_vals[self._name] = ReferenceListImpl(self.model, obj, self.ref_field)
         return obj._ref_vals[self._name]
 
 
 class CollectionList(list):
     _store: 'Store'
 
-    def __init__(self, owner: 'Model', model, filter, own_prop=None):
+    def __init__(self, owner: 'Model', model, filter, own_prop=None, key_only=False):
         super().__init__()
         self.owner = owner
         self._model = model
@@ -353,11 +371,13 @@ class CollectionList(list):
         self.own_prop = own_prop
         self._store = owner._store
         self.is_loaded = False
+        self.key_only = key_only
 
         filter = self.filter
         if isinstance(filter, str):
             self._filter_fun = lambda entity: getattr(entity, self.filter) in (getattr(self.owner, self.own_prop), self.owner)
         if isinstance(filter, (list, dict)):
+            print ('filter', [(f, [getattr(self.owner, own_prop), self.owner]) for f in filter])
             self._filter_fun = lambda entity: any((getattr(entity, f) in [getattr(self.owner, own_prop), self.owner] for f in filter))
 
         if self._store:
@@ -369,7 +389,7 @@ class CollectionList(list):
         if isinstance(self.filter, str):
             ref = getattr(self.__model, self.filter)
             f = ref._name
-            value = self.owner.id
+            value = self.key_only and self.owner.id or self.owner.full_id
             for x in self._store.get_all(self.__model, index=f, index_value=value):
                 super(CollectionList, self).append(x)
 
@@ -377,7 +397,7 @@ class CollectionList(list):
             for f in self.filter:
                 ref = getattr(self.__model, f)
                 f = ref._name
-                value = self.owner.id
+                value = self.key_only and self.owner.id or self.owner.full_id
                 for x in self._store.get_all(self.__model, index=f, index_value=value):
                     super(CollectionList, self).append(x)
 
@@ -394,6 +414,7 @@ class CollectionList(list):
             for f in [getattr(self.__model, ff) == value for ff in self.filter]:
                 f.or_ = True
                 q = q.filter(f)
+            print(q.make_aql())
         else:
             f: Filter = getattr(self.__model, self.filter) == value
             q = q.filter(f)
@@ -425,7 +446,7 @@ class Collection:
     def __init__(self, model, ref_prop, own_prop=None, key_only=False):
         self._model = model
         self.ref_prop = ref_prop
-        self.own_prop = own_prop or 'id'
+        self.own_prop = own_prop or (key_only and 'id' or 'full_id')
         self.key_only = key_only
 
     @property
@@ -436,7 +457,7 @@ class Collection:
 
     def __get__(self, instance: 'Model', owner=None):
         if self._name not in instance._collection_vals:
-            instance._collection_vals[self._name] = CollectionList(instance, self.model, self.ref_prop, self.own_prop)
+            instance._collection_vals[self._name] = CollectionList(instance, self.model, self.ref_prop, self.own_prop, self.key_only)
             if self._name not in instance._collection_loaded:
                 instance._collection_vals[self._name].load()
         return instance._collection_vals[self._name]
@@ -455,24 +476,38 @@ class ModelPropertyAccessor(Filterable):
     def from_db(value):
         return value
 
+    def get_data(self, instance):
+        return instance._data.data if hasattr(instance._data, 'data') else instance._data
+
     def __get__(self, instance: 'Model', owner):
         if not instance:
             return self
         if self._name not in instance._properties:
-            data = instance._data.data
+            data = self.get_data(instance)
             d = data.get(self._name, self.__impl__.default.__class__()) or self.__impl__.default.__class__()
             data[self._name] = d
             instance._properties[self._name] = self.__impl__(**self.kwargs, **dict(data=d, parent=instance, name=self._name, store=instance._store))
         return instance._properties[self._name]
 
     def __set__(self, instance, value):
-        prop = self.__get__(instance, None)
-        prop.set_to(value)
+        if value is None:
+            data = self.get_data(instance)
+            data[self._name] = None
+            instance._properties[self._name] = None
+        else:
+            prop = self.__get__(instance, None)
+            if prop is None:
+                del instance._properties[self._name]
+                prop = self.__get__(instance, None)
+            prop.set_to(value)
 
-    def __init__(self):
+    def __init__(self, fields):
         self.kwargs = {}
         self.default = {}
-        self._fields = {}
+        self._fields = fields
+        for f, v in fields.items():
+            setattr(self, f, v)
+        
 
     __impl__ = None
 
@@ -499,6 +534,12 @@ class ModelProperty(metaclass=FieldMeta):
     def from_db(v):
         return v
 
+    def get_property_path(self):
+        if hasattr(self, '_property_path_parent'):
+            if hasattr (self._property_path_parent, 'get_property_path'):
+                return self._property_path_parent.get_property_path() + '.' + self._name
+        return self._name
+
     def _setup_store(self, store):
         self._store = store
 
@@ -508,14 +549,21 @@ class ModelProperty(metaclass=FieldMeta):
     def set_to(self, value):
         raise Exception('not implemented')
 
+    def reset(self):
+        self._data.clear()
+        self._dirty.add(self._property_key)
+
     def __init__(self, data=None, parent=None, name=None, store=None, **kwargs):
         super().__init__()
+        for f, v in self._fields.items():
+            v._property_path_parent = self
         self.hidden = False
         if parent is None and data is None:
             self.kwargs = kwargs
             return
         self._name = name
         self._data = data
+        self._properties = {}
         if hasattr(self, 'parent') and self.parent and parent:
             raise Exception('already set')
         self.parent = parent
@@ -542,7 +590,7 @@ class ModelProperty(metaclass=FieldMeta):
         changes = set()
         for x in self._dirty:
             if x.startswith(self._property_key + '.'):
-                changes.add(x.replace(self._property_key + '.', ''))
+                changes.add(x.replace(self._property_key + '.', '').split('.')[0])
 
         d = self._data
         if not d:
@@ -592,12 +640,18 @@ class DictProperty(ModelProperty):
 
     def update(self, data):
         self._data.update(data)
+        self._dirty.add(self._property_key)
 
     def set_to(self, data):
-        self._data = data
+        self._data.clear()
+        self._data.update(data)
+        self._dirty.add(self._property_key)
 
     def to_json(self):
-        return self._dump()
+        return self._data.copy()
+
+    def _dump(self, changes_only=False):
+        return self._data.copy()
 
 
 class ObjectProperty(ModelProperty):
@@ -614,7 +668,12 @@ class ObjectProperty(ModelProperty):
         self._data.update(value)
 
     def set_to(self, value):
-        self._data.set(value)
+        if value is None:
+            self._data.clear()
+            self._data = None
+        else:
+            self._data.set(value)
+        self._dirty.add(self._property_key)
 
     def _setup(self):
         self._data = ObjectView(self._data)
@@ -626,6 +685,8 @@ class ObjectProperty(ModelProperty):
         if not len(self._dirty):
             return self._data.json
         data = {}
+        if self._data is None:
+            return None
         for key in self._fields.keys():
             x = getattr(self, key)
             if hasattr(x, '_dump'):
@@ -667,17 +728,20 @@ class ListProperty(list, ModelProperty):
             self.append(a)
 
     def append(self, other):
-        if not isinstance(other, self.model):
-            m = self.model(other)
-            other = m
-        if isinstance(other, self.model):
+        if issubclass(self.model, Model) or issubclass(self.model, ModelProperty):
             d = other._data
             if isinstance(d, ObjectView):
                 d = d.data
             other = self.model(data=d, parent=self, name='[*]')
+
+        if not isinstance(other, self.model):
+            m = self.model(other)
+            other = m
+
         list.append(self, other)
         self._dirty.add(self._property_key + '.[*]')
         self._added.append(other)
+        return other
 
     def remove(self, value) -> None:
         list.remove(self, value)
@@ -702,6 +766,11 @@ class GraphRelationship:
 class ORM:
     all_models: Dict[str, 'Model'] = {}
 
+    @staticmethod
+    def model(model) -> 'Model':
+        if type(model) == str:
+            model = ORM.all_models[model]
+        return model
 
 class ModelMeta(type):
     def __new__(mcs, name, bases, attrs):
@@ -720,9 +789,8 @@ class ModelMeta(type):
             if isinstance(obj, ModelProperty):
                 # add to schema fields
                 new_fields[obj_name] = obj
-                new_attrs[obj_name] = ModelPropertyAccessor()
+                new_attrs[obj_name] = ModelPropertyAccessor(new_fields[obj_name]._fields)
                 new_attrs[obj_name]._name = obj_name
-                new_attrs[obj_name]._fields = new_fields[obj_name]._fields
                 new_attrs[obj_name].kwargs = obj.kwargs
                 new_attrs[obj_name].__impl__ = obj.__class__
             elif isinstance(obj, Reference):
@@ -741,7 +809,7 @@ class ModelMeta(type):
             new_class.__collection__ = attrs.get('__collection__')
 
         for obj_name, obj in attrs.items():
-            if isinstance(obj, (Field, Reference, ReferenceList, MarshmellowField, Collection)):
+            if isinstance(obj, (Field, Reference, ReferenceList, MarshmellowField, Collection, RemoteReference, ModelProperty)):
                 obj._name = obj_name
 
         for obj_name, obj in attrs.items():
@@ -753,11 +821,14 @@ class ModelMeta(type):
 
         ORM.all_models[name] = new_class
 
+        for f,v in new_class._fields.items():
+             setattr(v, '_property_path_parent', new_class)
+
         return new_class
 
 
 class DictObject(object):
-    def __init__(self, data=None):
+    def __init__(self, data=None, parent=None, name=None):
         if data is None:
             data = {}
         self.__data = data
@@ -789,6 +860,9 @@ class ObjectView(object):
     def update(self, d):
         self.data.update(d)
 
+    def clear(self):
+        self.data.clear()
+
     def __getitem__(self, key):
         return self.data[key]
 
@@ -814,13 +888,13 @@ class Model(metaclass=ModelMeta):
     def __getitem__(self, item):
         return getattr(self, item)
 
-    def __init__(self, data=None, from_db=False, parent=None, name=None):
+    def __init__(self, data=None, from_db=False, parent=None, name=None, store=None):
         if data is None:
             data = {}
         self._name = name
         self.parent = parent
         self._dirty = set()
-        self._store = None
+        self._store = store
         if parent is not None:
             self._store = parent._store
             self._dirty = parent._dirty
@@ -894,6 +968,7 @@ class Model(metaclass=ModelMeta):
             changes.add(x.split('.')[0])
         changes.add('_key')
         changes.add('_rev')
+        print(self.__class__)
 
         for key, field in self._fields.items():
             if changes_only and key not in changes: continue

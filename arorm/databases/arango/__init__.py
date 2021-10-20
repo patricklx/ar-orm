@@ -75,7 +75,7 @@ class ArangoDatabase(Database):
             collection_dict = {}
             for b in batch:
                 if b._rev:
-                    print(b._id, b._rev)
+                    print(b._id, b._rev, b._dump())
                     raise Exception('cannot be new')
                 collection_dict[b.__collection__] = collection_dict.get(b.__collection__, [])
                 collection_dict[b.__collection__].append(b)
@@ -104,7 +104,9 @@ class ArangoDatabase(Database):
 
             print('full_aql', full_aql)
             try:
-                print('json len', len(json.dumps(collection_dict)))
+                pass
+
+                #print('json len', json.dumps(collection_dict))
             except Exception:
                 pass
             result = tx.aql.execute(full_aql, bind_vars={'docs': collection_dict})
@@ -139,7 +141,7 @@ class ArangoDatabase(Database):
             full_aql += 'FOR r in ' + aql_return + ' RETURN r'
 
             print('full_aql', full_aql)
-            print('json len', len(json.dumps(collection_dict)))
+            #print('json len', json.dumps(collection_dict))
             result = tx.aql.execute(full_aql, bind_vars={'docs': collection_dict})
             for i, r in enumerate(result):
                 order[i].update(r)

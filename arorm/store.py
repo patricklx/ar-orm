@@ -46,17 +46,22 @@ class Store:
         s.__query = self.__query
         return s
 
+    def graph(self, name):
+      return self.database.graph(name)
+
+    def create(self, model: typing.Type[T], data) -> T:
+        data = data or {}
+        d = model(data=data, store=self)
+        return self.add(d)
+
     def get(self, type: T, id) -> T:
+        from . import ORM
+        type = ORM.model(type)
         if '/' not in id:
             id = type.__collection__ + '/' + id
         value = self._cache.get(id, None)
         if value: return value
-        return self.query(type).get(id)
-
-    def create(self, model: typing.Type[T], data=None) -> T:
-        data = data or {}
-        d = model(data=data)
-        return self.add(d)
+        return self.query(type)._get(id)
 
     def add(self, entity: 'Model'):
         from arorm import ReferenceId, Reference
@@ -122,7 +127,7 @@ class Store:
         return [e for e in self._cache.values() if len(e._dirty) and e not in self._new]
 
     def remove(self, entity: 'Model'):
-        if entity._id:
+        if entity._id and entity not in self._removed:
             self._removed.add(entity)
         if entity.full_id and entity.full_id in self._cache:
             del self._cache[entity.full_id]

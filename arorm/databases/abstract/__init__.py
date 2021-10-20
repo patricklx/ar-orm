@@ -64,9 +64,6 @@ class StoreQuery(typing.Generic[T]):
     def filter(self, *args, **kwargs) -> 'StoreQuery[T]':
         pass
 
-    def delete(self):
-        pass
-
 
 class Filter:
     def __init__(self, name, op, var):

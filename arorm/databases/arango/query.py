@@ -38,6 +38,9 @@ class ArangoStoreQuery(ArangoQuery):
         self.entity_type = entity_type
 
     def get(self, id):
+        return self.store.get(self.entity_type, id)
+
+    def _get(self, id):
         try:
             obj = super(ArangoStoreQuery, self).by_key(id)
             obj = self.store.add(obj)
@@ -49,6 +52,9 @@ class ArangoStoreQuery(ArangoQuery):
         values = super(ArangoStoreQuery, self).all()
         values = [self.store.add(obj) for obj in values]
         return values
+
+    def make_aql(self):
+        return super(ArangoStoreQuery, self)._make_aql()
 
     def count(self):
         return super(ArangoStoreQuery, self).count()
@@ -63,14 +69,15 @@ class ArangoStoreQuery(ArangoQuery):
             yield obj
 
     def filter(self, *args, **kwargs):
-        from arorm.databases.arango import ArangoFilter
+        from core.orm.databases.arango import ArangoFilter
         for arg in args:
             if isinstance(arg, Filter):
                 f = ArangoFilter(arg.name, arg.op, arg.var)
-                super(ArangoStoreQuery, self).filter(f.expression, _or=f.or_, prepend_rec_name=f.prepend, **f.vars)
+                print('filter', f.expression, arg.prepend, arg.or_)
+                super(ArangoStoreQuery, self).filter(f.expression, _or=arg.or_, prepend_rec_name=f.prepend, **f.vars)
             else:
                 if not isinstance(arg, str):
-                    raise Exception('arg is not a string')
+                    raise Exception('arg is not a string:' + str(arg))
                 super(ArangoStoreQuery, self).filter(arg, **kwargs)
         return self
 
