@@ -1,12 +1,8 @@
 import copy
 import typing
-from abc import ABC
 from itertools import chain
 from typing import Dict, Union, Set, Any, TYPE_CHECKING, List, Type
-
-import inflect
 import inflection
-from marshmallow.fields import Field as MarshmellowField
 
 from arorm.databases.abstract import Filter
 
@@ -32,8 +28,6 @@ class FieldMeta(type):
         new_fields = {}
         new_attrs = {**attrs}
         for obj_name, obj in attrs.items():
-            if isinstance(obj, MarshmellowField):
-                obj = Field()
             if 'Field' in globals() and isinstance(obj, Field):
                 # add to schema fields
                 new_fields[obj_name] = attrs.get(obj_name)
@@ -557,7 +551,8 @@ class ModelProperty(metaclass=FieldMeta):
         super().__init__()
         for f, v in self._fields.items():
             v._property_path_parent = self
-        self.hidden = False
+        self.hidden = kwargs.get('hidden', False)
+        self.nullable = kwargs.get('nullable', True)
         if parent is None and data is None:
             self.kwargs = kwargs
             return
@@ -781,8 +776,6 @@ class ModelMeta(type):
         refs = {}
 
         for obj_name, obj in attrs.items():
-            if isinstance(obj, MarshmellowField):
-                obj = Field()
             if isinstance(obj, Field):
                 # add to schema fields
                 new_fields[obj_name] = obj
@@ -809,7 +802,7 @@ class ModelMeta(type):
             new_class.__collection__ = attrs.get('__collection__')
 
         for obj_name, obj in attrs.items():
-            if isinstance(obj, (Field, Reference, ReferenceList, MarshmellowField, Collection, RemoteReference, ModelProperty)):
+            if isinstance(obj, (Field, Reference, ReferenceList, Collection, RemoteReference, ModelProperty)):
                 obj._name = obj_name
 
         for obj_name, obj in attrs.items():
@@ -884,6 +877,10 @@ class Model(metaclass=ModelMeta):
     _collection_vals: Dict[str, CollectionList]
     _store: 'Store'
     _embedded: bool
+
+    @property
+    def rev(self):
+        return self._rev
 
     def __getitem__(self, item):
         return getattr(self, item)

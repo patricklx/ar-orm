@@ -1,4 +1,3 @@
-import json
 from typing import List, Tuple
 
 from arango import ArangoClient

@@ -45,6 +45,9 @@ class StoreQuery(typing.Generic[T]):
         self.store = store
         self.entity_type = entity_type
 
+    def find_one(self, id) -> T:
+        pass
+
     def get(self, id) -> T:
         pass
 
