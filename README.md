@@ -34,6 +34,7 @@ class Book(Model):
 
 db = dict(host='127.0.01', user='root', password='root', port=8529, driver='arango')
 store = Store(db)
+store.setup_db()
 user = store.create(User) # will create a user on commit
 book = store.create(Book) # will create a book on commit
 book.author = user
