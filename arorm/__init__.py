@@ -1,8 +1,12 @@
 import copy
 import typing
+from abc import ABC
 from itertools import chain
 from typing import Dict, Union, Set, Any, TYPE_CHECKING, List, Type
+
+import inflect
 import inflection
+from marshmallow.fields import Field as MarshmellowField
 
 from arorm.databases.abstract import Filter
 
@@ -28,6 +32,8 @@ class FieldMeta(type):
         new_fields = {}
         new_attrs = {**attrs}
         for obj_name, obj in attrs.items():
+            if isinstance(obj, MarshmellowField):
+                obj = Field()
             if 'Field' in globals() and isinstance(obj, Field):
                 # add to schema fields
                 new_fields[obj_name] = attrs.get(obj_name)
@@ -214,7 +220,6 @@ class RemoteReference:
         obj._store.add(value)
 
 
-
 class ReferenceId(Field):
     ref_name: str
 
@@ -236,6 +241,7 @@ class ReferenceId(Field):
 class Reference:
     _name: str
     ref_field: Field
+    back_ref: str
 
     def __init__(self, ref: Union[Field, str], model: Union[Type['Model'], str]):
         self.ref_field = ref
@@ -276,6 +282,7 @@ class Reference:
             obj._dirty.add(self.ref_field._name)
 
 
+
 class ReferenceIdList(Field):
     ref_name: str
 
@@ -303,19 +310,20 @@ class ReferenceListImpl:
         self.ref_field = ref_field
         self.added = []
         self._refs = {}
+        self.__list = self.obj._data.get(self.ref_field._name, []) or []
 
     def __contains__(self, item):
         return item in self.all()
 
     def __iter__(self):
-        self.iter = chain((self.obj._store.get(self.collection, x) for x in self.obj._data[self.ref_field._name]), self.added)
+        self.iter = chain((self.obj._store.get(self.collection, x) for x in self.__list), self.added)
         return self.iter
 
     def __next__(self):
         return next(self.iter)
 
     def all(self):
-        return [self.obj._store.get(self.collection, x) for x in self.obj._data[self.ref_field._name]] + self.added
+        return [self.obj._store.get(self.collection, x) for x in self.__list] + self.added
 
     def append(self, obj: 'Model'):
         if obj not in self.added:
@@ -324,7 +332,7 @@ class ReferenceListImpl:
 
     def remove(self, obj: 'Model'):
         if obj.id:
-            self.obj._data[self.ref_field._name].remove(obj.id)
+            self.__list.remove(obj.id)
         else:
             self.added.remove(obj)
 
@@ -347,8 +355,6 @@ class ReferenceList:
         if not obj: return self.ref_field
         if self._name in obj._ref_vals:
             return obj._ref_vals[self._name]
-        if obj._data.get(self.ref_field._name, None) is None:
-            return []
 
         obj._ref_vals[self._name] = ReferenceListImpl(self.model, obj, self.ref_field)
         return obj._ref_vals[self._name]
@@ -367,33 +373,64 @@ class CollectionList(list):
         self.is_loaded = False
         self.key_only = key_only
 
+        collection = self
+        class InternalList(list):
+            def append(self, __object) -> None:
+                collection.append(__object)
+
+            def refresh(self):
+                collection.refresh()
+                self.clear()
+                self.extend(collection.get_list())
+
+        self.InternalListClass = InternalList
+
         filter = self.filter
         if isinstance(filter, str):
-            self._filter_fun = lambda entity: getattr(entity, self.filter) in (getattr(self.owner, self.own_prop), self.owner)
+            def func(entity):
+                if getattr(entity, self.filter) == getattr(self.owner, own_prop): return True
+                if getattr(entity, entity._fields[self.filter].ref_name) == self.owner: return True
+                return False
+            self._filter_fun = func
         if isinstance(filter, (list, dict)):
-            print ('filter', [(f, [getattr(self.owner, own_prop), self.owner]) for f in filter])
-            self._filter_fun = lambda entity: any((getattr(entity, f) in [getattr(self.owner, own_prop), self.owner] for f in filter))
+            def func(entity):
+                for f in self.filter:
+                    if getattr(entity, f) == getattr(self.owner, own_prop): return True
+                    if getattr(entity, entity._fields[f].ref_name) == self.owner: return True
+                return False
+            self._filter_fun = func
 
         if self._store:
             self._setup_store(self._store)
 
-    def _setup_store(self, store):
-        store.events.on('add', self.__did_add)
-        self._store = store
+    def get_list(self):
+        inter_list = []
         if isinstance(self.filter, str):
             ref = getattr(self.__model, self.filter)
             f = ref._name
             value = self.key_only and self.owner.id or self.owner.full_id
-            for x in self._store.get_all(self.__model, index=f, index_value=value):
-                super(CollectionList, self).append(x)
+            if value is not None:
+                inter_list += self._store.get_all(self.__model, index=f, index_value=value)
+            else:
+                value = str(id(self.owner))
+                inter_list += self._store.get_all(self.__model, index=f+'_no_id', index_value=value)
 
         if isinstance(self.filter, (list, dict)):
             for f in self.filter:
                 ref = getattr(self.__model, f)
                 f = ref._name
                 value = self.key_only and self.owner.id or self.owner.full_id
-                for x in self._store.get_all(self.__model, index=f, index_value=value):
-                    super(CollectionList, self).append(x)
+                if value is not None:
+                    inter_list += self._store.get_all(self.__model, index=f, index_value=value)
+                else:
+                    value = str(id(self.owner))
+                    inter_list += self._store.get_all(self.__model, index=f+'_no_id', index_value=value)
+        l = self.InternalListClass()
+        l.extend(set(inter_list))
+        return l
+
+    def _setup_store(self, store):
+        self._store = store
 
     def refresh(self):
         self.is_loaded = False
@@ -403,6 +440,8 @@ class CollectionList(list):
         if self.is_loaded:
             return
         value = getattr(self.owner, self.own_prop)
+        if value is None:
+            return
         q = self._store.query(self.__model)
         if isinstance(self.filter, (list, dict)):
             for f in [getattr(self.__model, ff) == value for ff in self.filter]:
@@ -421,17 +460,14 @@ class CollectionList(list):
             self._model = ORM.all_models[self._model]
         return self._model
 
-    def __did_add(self, entity: 'Model'):
-        if entity.__collection__ == self.__model.__collection__:
-            if self._filter_fun(entity):
-                super(CollectionList, self).append(entity)
-
     def append(self, obj: 'Model') -> None:
-        if type(self.filter) != str:
+        if type(self.filter) == str:
+            if self.owner.id and getattr(obj, self.filter) != self.owner.id:
+                setattr(obj, self.filter, self.owner.id)
+            elif getattr(obj, obj._fields[self.filter].ref_name) != self.owner:
+                setattr(obj, obj._fields[self.filter].ref_name, self.owner)
+        else:
             raise Exception('cannot add to this collection')
-        setattr(obj, self.filter, self.owner)
-        if not self.owner._store:
-            super(CollectionList, self).append(obj)
 
 
 class Collection:
@@ -454,7 +490,7 @@ class Collection:
             instance._collection_vals[self._name] = CollectionList(instance, self.model, self.ref_prop, self.own_prop, self.key_only)
             if self._name not in instance._collection_loaded:
                 instance._collection_vals[self._name].load()
-        return instance._collection_vals[self._name]
+        return instance._collection_vals[self._name].get_list()
 
 
 class ModelPropertyAccessor(Filterable):
@@ -561,14 +597,20 @@ class ModelProperty(metaclass=FieldMeta):
         self._properties = {}
         if hasattr(self, 'parent') and self.parent and parent:
             raise Exception('already set')
-        self.parent = parent
         self._property_key = ''
         self._store: Store = store
-        if parent is not None:
-            self._store = parent._store
         self._dirty = set()
         if name:
             self._name = name
+        self._setup_parent(parent)
+
+    def _setup_parent(self, parent, name=None):
+        self._properties = self._properties or {}
+        if name:
+            self._name = name
+        if parent is not None:
+            self._store = parent._store
+        self.parent = parent
         if self.parent is not None:
             self._dirty = parent._dirty
             if hasattr(self.parent, '_property_key'):
@@ -630,7 +672,7 @@ class DictProperty(ModelProperty):
         self._dirty.add(self._property_key + '.' + str(key))
 
     def __delitem__(self, key):
-        del self._data[self._name][key]
+        del self._data[key]
         self._dirty.add(self._property_key + '.' + str(key))
 
     def update(self, data):
@@ -724,14 +766,14 @@ class ListProperty(list, ModelProperty):
 
     def append(self, other):
         if issubclass(self.model, Model) or issubclass(self.model, ModelProperty):
-            d = other._data
-            if isinstance(d, ObjectView):
-                d = d.data
-            other = self.model(data=d, parent=self, name='[*]')
+            if hasattr(other, '_setup_parent') and other._setup_parent:
+                other._setup_parent(self, '<idx>')
 
         if not isinstance(other, self.model):
             m = self.model(other)
             other = m
+            if hasattr(other, '_setup_parent') and other._setup_parent:
+                other._setup_parent(self, '<idx>')
 
         list.append(self, other)
         self._dirty.add(self._property_key + '.[*]')
@@ -767,6 +809,7 @@ class ORM:
             model = ORM.all_models[model]
         return model
 
+
 class ModelMeta(type):
     def __new__(mcs, name, bases, attrs):
         super_new = super(ModelMeta, mcs).__new__
@@ -776,6 +819,8 @@ class ModelMeta(type):
         refs = {}
 
         for obj_name, obj in attrs.items():
+            if isinstance(obj, MarshmellowField):
+                obj = Field()
             if isinstance(obj, Field):
                 # add to schema fields
                 new_fields[obj_name] = obj
@@ -802,7 +847,7 @@ class ModelMeta(type):
             new_class.__collection__ = attrs.get('__collection__')
 
         for obj_name, obj in attrs.items():
-            if isinstance(obj, (Field, Reference, ReferenceList, Collection, RemoteReference, ModelProperty)):
+            if isinstance(obj, (Field, Reference, ReferenceList, MarshmellowField, Collection, RemoteReference, ModelProperty)):
                 obj._name = obj_name
 
         for obj_name, obj in attrs.items():
@@ -832,6 +877,9 @@ class DictObject(object):
 
     def __getattr__(self, item):
         return self.__data.get(item)
+
+    def __contains__(self, item):
+        return item in self.__data
 
     def _dump(self, changes_only=False):
         return self.__data
@@ -876,7 +924,7 @@ class Model(metaclass=ModelMeta):
     _properties: Dict[str, Any]
     _collection_vals: Dict[str, CollectionList]
     _store: 'Store'
-    _embedded: bool
+    _embedded: bool = False
 
     @property
     def rev(self):
@@ -892,9 +940,6 @@ class Model(metaclass=ModelMeta):
         self.parent = parent
         self._dirty = set()
         self._store = store
-        if parent is not None:
-            self._store = parent._store
-            self._dirty = parent._dirty
         self._ref_vals = {}
         self._properties = {}
         self._collection_vals = {}
@@ -906,7 +951,15 @@ class Model(metaclass=ModelMeta):
                     data[key] = val.from_db(data.get(key, val.default or None))
             self._dirty.clear()
         self._data.set(data)
-        self._embedded = False
+        self._setup_parent(parent)
+
+    def _setup_parent(self, parent, name=None):
+        if name:
+            self._name = name
+        if parent is not None:
+            self._store = parent._store
+            self._dirty = parent._dirty
+            self._setup_store(self._store)
 
     def _setup_store(self, store):
         if self._store and self._store != store:
@@ -946,18 +999,19 @@ class Model(metaclass=ModelMeta):
     def load(self, data):
         self._data.set(data)
 
-    def update(self, data):
-        self._data.update(data)
+    def update(self, data: dict):
+        for k,v in data.items():
+            setattr(self, k, v)
 
-    def to_json(self):
-        data = self._dump()
+    def to_json(self, with_defaults=False):
+        data = self._dump(with_defaults=with_defaults)
         for key, field in self._fields.items():
             if field.hidden:
                 del data[key]
         return data
 
-    def _dump(self, changes_only=False):
-        if self._store and not len(self._dirty) and self not in self._store._new:
+    def _dump(self, changes_only=False, with_defaults=False):
+        if self._store and not len(self._dirty) and self not in self._store._new and not with_defaults:
             return self._data.json
         data = {}
         changes = set()
@@ -965,7 +1019,7 @@ class Model(metaclass=ModelMeta):
             changes.add(x.split('.')[0])
         changes.add('_key')
         changes.add('_rev')
-        print(self.__class__)
+        changes_only = changes_only and self not in self._store._new
 
         for key, field in self._fields.items():
             if changes_only and key not in changes: continue

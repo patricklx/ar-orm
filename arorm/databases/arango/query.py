@@ -2,11 +2,11 @@ import typing
 
 from arango_orm.exceptions import DocumentNotFoundError
 
-from arorm.databases.abstract import Filter, RawQuery, StoreQuery
+from core.orm.databases.abstract import Filter, RawQuery, StoreQuery
 from arango_orm.query import Query as ArangoQuery
 
 if typing.TYPE_CHECKING:
-    from arorm import Store
+    from core.orm import Store, Model
 
 
 class ArRawQuery(RawQuery):
@@ -32,7 +32,7 @@ class ArRawQuery(RawQuery):
 
 
 class ArangoStoreQuery(ArangoQuery, StoreQuery):
-    def __init__(self, store: 'Store', entity_type: str):
+    def __init__(self, store: 'Store', entity_type: 'Model'):
         super(ArangoStoreQuery, self).__init__(entity_type, store.database)
         self.store = store
         self.entity_type = entity_type
@@ -64,6 +64,7 @@ class ArangoStoreQuery(ArangoQuery, StoreQuery):
         return ArRawQuery(database, query, kwargs)
 
     def aql(self, query, **kwargs):
+        print("aql", query)
         for obj in super(ArangoStoreQuery, self).aql(query, **kwargs):
             obj = self.store.add(obj)
             yield obj
@@ -82,5 +83,5 @@ class ArangoStoreQuery(ArangoQuery, StoreQuery):
         return self
 
     def delete(self):
-        self.store.queue_ops.append([self, self.delete])
+        self.store.queue_ops.append([self, 'delete', [self.entity_type.__collection__]])
         return self

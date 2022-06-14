@@ -17,7 +17,7 @@ class Store:
     _cache_by_type_index: Dict[str, List['Model']]
     _new: Set['Model']
     _removed: Set['Model']
-    queue_ops: List['StoreQuery']
+    queue_ops: List[typing.Tuple['StoreQuery', str, List['str']]] # query, action, collections
     events: events.EventEmitter
 
     def __init__(self, config=None):
@@ -58,15 +58,15 @@ class Store:
             id = type.__collection__ + '/' + id
         value = self._cache.get(id, None)
         if value: return value
-        return self.query(type)._get(id)
+        return self.query(type).find_one(id)
 
     def add(self, entity: 'Model'):
-        from arorm import ReferenceId, Reference
+        from core.orm import ReferenceId, Reference
         if entity.full_id in self._cache:
-            if self._cache[entity.full_id] == entity:
+            if self._cache[entity.full_id]:
+                if self._cache[entity.full_id].rev != entity.rev:
+                    raise Exception("revision for " + entity.full_id + " changed")
                 return self._cache[entity.full_id]
-            self._cache[entity.full_id].update(entity._dump())
-            entity._data = self._cache[entity.full_id]._data
             return self._cache[entity.full_id]
         if entity.__collection__ not in self._cache_by_type:
             self._cache_by_type[entity.__collection__] = []
@@ -75,16 +75,26 @@ class Store:
             self._cache_by_type[entity.__collection__].append(entity)
             if entity._key:
                 self._cache[entity.full_id] = entity
+            for name, f in entity._fields.items():
+                if isinstance(f, ReferenceId):
+                    value = getattr(entity, f._name)
+                    if value is None and getattr(entity, entity._fields[f._name].ref_name):
+                        value = str(id(getattr(entity, entity._fields[f._name].ref_name)))
+
+                    if value is None: continue
+                    idx = entity.__collection__ + '_' + f._name + '_no_id_' + value
+                    if idx not in self._cache_by_type_index:
+                        self._cache_by_type_index[idx] = []
+                    l = self._cache_by_type_index[idx]
+                    l.append(entity)
         else:
             self._cache[entity.full_id] = entity
             self._cache_by_type[entity.__collection__].append(entity)
             for name, f in entity._fields.items():
-                if isinstance(f, (ReferenceId, Reference)):
+                if isinstance(f, ReferenceId):
                     if not getattr(entity, f._name): continue
                     if isinstance(f, ReferenceId):
                         value = getattr(entity, f._name)
-                    if isinstance(f, Reference):
-                        value = getattr(entity, f.ref_field)
                     idx = entity.__collection__ + '_' + f._name + '_' + value
                     if idx not in self._cache_by_type_index:
                         self._cache_by_type_index[idx] = []
@@ -140,8 +150,12 @@ class Store:
     def raw_query(self, q):
         return self.__query.raw(self.database, q)
 
-    def setup_db(self):
-        self.database.setup_db([m for m in ORM.all_models.values() if not m._embedded])
+    def queue_raw_query(self, q, collections):
+        self.queue_ops.append([self.raw_query(q), 'execute', collections])
+
+    def setup_db(self, graphs=[]):
+        from core.orm import ORM
+        self.database.setup_db([m for m in ORM.all_models.values() if not m._embedded], graphs)
 
     def run_after_commit(self, fn):
         self.run_after_commit_callbacks.append(fn)

@@ -2,11 +2,11 @@ import typing
 from typing import Type
 
 
-class Database:
-    def commit(self, new, changed, removed):
+class AbstractDatabase:
+    def commit(self, new, changes, removed, query_ops: typing.List[typing.Tuple['ArangoStoreQuery', str]]):
         pass
 
-    def setup_db(self, models):
+    def setup_db(self,  models, graphs=[]):
         pass
 
 
@@ -23,6 +23,9 @@ T = typing.TypeVar('T')
 
 
 class RawQuery:
+    query: str
+    kwargs: dict
+
     def execute(self):
         pass
 

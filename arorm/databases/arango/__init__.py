@@ -1,9 +1,9 @@
 from typing import List, Tuple
 
-from arango import ArangoClient
+from arango import ArangoClient, exceptions
 from arango_orm.database import Database
 
-from arorm.databases.abstract import DatabaseFactory
+from arorm.databases.abstract import DatabaseFactory, AbstractDatabase, RawQuery
 from arorm.databases.arango.filter import ArangoFilter
 from arorm.databases.arango.query import ArangoStoreQuery
 
@@ -19,14 +19,14 @@ class ArangoDatabaseFactory(DatabaseFactory):
         return ArangoDatabase(db)
 
 
-class ArangoDatabase(Database):
+class ArangoDatabase(Database, AbstractDatabase):
 
     def _find_deps(self, items, entity: 'Model', collected: set):
-        insertions = []
+        insertions = set()
         from core.orm import ReferenceListImpl
         if entity not in items: return insertions
         if entity not in collected:
-            insertions.append(entity)
+            insertions.add(entity)
             collected.add(entity)
         else:
             return insertions
@@ -34,42 +34,56 @@ class ArangoDatabase(Database):
             all = entity.all()
             for a in all:
                 if a in items:
-                    insertions.extend(self._find_deps(items, getattr(entity, a), collected))
+                    insertions |= (self._find_deps(items, getattr(entity, a), collected))
             return insertions
         else:
             for name in entity._refs.keys():
                 if getattr(entity, name):
-                    insertions.extend(self._find_deps(items, getattr(entity, name), collected))
+                    insertions |= (self._find_deps(items, getattr(entity, name), collected))
         return insertions
 
-    def _compute_batch_order(self, items):
-        collected = set()
-        insertions = []
-        for x in items:
-            insertions.extend(self._find_deps(items, x, collected))
+    def _compute_batch_order(self, items, collected: set):
+        insertions = set(items)
         batches = []
         b = set()
-        collected = set()
-        for i in insertions:
-            from core.orm import ReferenceListImpl
-            if isinstance(i, ReferenceListImpl):
-                continue
-            elif all((r in collected for r in i._ref_vals.values())):
-                b.add(i)
-            else:
-                collected = collected.union(b)
-                batches.append(list(b))
-                b = set([i])
+        while len(insertions):
+            for i in insertions:
+                from core.orm import ReferenceListImpl
+                if isinstance(i, ReferenceListImpl):
+                    insertions = insertions - i
+                    continue
+                if all((r in collected or isinstance(r, ReferenceListImpl) or r._id for r in i._ref_vals.values())):
+                    b.add(i)
+            if not len(b):
+                i = insertions.pop()
+                raise Exception('unable to commit, possible loop -> ' + str(i.to_json()))
+            insertions = insertions - b
+            collected.update(b)
+            batches.append(list(b))
+            b = set()
         batches.append(b)
         return batches
 
     def commit(self, new, changes, removed, query_ops: List[Tuple['ArangoStoreQuery', str]]):
-        insertions = self._compute_batch_order(new)
-        changes = self._compute_batch_order(changes)
+        collected = set()
+        insertions = self._compute_batch_order(new, collected)
+        changes = self._compute_batch_order(changes, collected)
         collections = set((e.__collection__ for b in insertions for e in b))
-        collections = collections.union(set((e.__collection__ for b in changes for e in b)))
-        collections = collections.union(set((e.__collection__ for e in removed)))
+        collections = collections | (set((e.__collection__ for b in changes for e in b)))
+        collections = collections | (set((e.__collection__ for e in removed)))
+        collections = collections | set(coll for ops in query_ops for coll in ops[2])
         tx = self.begin_transaction(write=list(collections))
+
+        for op in query_ops:
+            if op[1] == 'delete':
+                aql = op[0]._make_aql()
+                aql += "\n REMOVE {_key: rec._key} IN @@collection"
+                tx.aql.execute(aql, bind_vars=op[0]._bind_vars)
+                query_ops.remove(op)
+
+        for n in removed:
+            tx.delete_document(n._id)
+
         for batch in insertions:
             collection_dict = {}
             for b in batch:
@@ -111,6 +125,7 @@ class ArangoDatabase(Database):
             result = tx.aql.execute(full_aql, bind_vars={'docs': collection_dict})
             for i, r in enumerate(result):
                 order[i].update(r)
+                order[i]._dirty.clear()
         for batch in changes:
             collection_dict = {}
             for b in batch:
@@ -144,15 +159,32 @@ class ArangoDatabase(Database):
             result = tx.aql.execute(full_aql, bind_vars={'docs': collection_dict})
             for i, r in enumerate(result):
                 order[i].update(r)
-        for n in removed:
-            print('removed', n._id)
-            tx.delete_document(n._id)
 
         for op in query_ops:
-            aql = op[0]._make_aql()
+            if op[1] == 'execute':
+                q: RawQuery = op[0]
+                tx.aql.execute(q.query, **q.kwargs)
             if op[1] == 'delete':
+                aql = op[0]._make_aql()
                 aql += "\n REMOVE {_key: rec._key} IN @@collection"
-                aql.execute(aql, bind_vars=op[0]._bind_vars)
+                tx.aql.execute(aql, bind_vars=op[0]._bind_vars)
         tx.commit_transaction()
 
+    def setup_db(self, models, graphs=[]):
+        print('creating models', [m.__collection__ for m in models])
+        for m in models:
+            try:
+                self.create_collection(m)
+            except exceptions.CollectionCreateError as e:
+                if e.http_code != 409: raise e
+
+        for g in graphs:
+            graph_instance = g(connection=self)
+            try:
+                self.create_graph(graph_instance)
+            except exceptions.GraphCreateError as e:
+                if e.http_code != 409: raise e
+
+    def _verify_collection(self, col):
+        return
 
