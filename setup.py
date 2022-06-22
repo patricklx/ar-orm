@@ -5,7 +5,7 @@ long_description = (this_directory / "README.md").read_text()
 
 setup(
     name='arorm',
-    version='0.3.2',
+    version='0.3.3',
     description='A python orm with identity pattern mainly for arango',
     long_description=long_description,
     long_description_content_type='text/markdown',

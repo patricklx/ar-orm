@@ -1,12 +1,13 @@
 import typing
 from typing import Set, Dict, List, TYPE_CHECKING, TypeVar
 import event_emitter as events
+import gevent.lock
 
 from .databases import databases
 from .databases.abstract import StoreQuery
 
 if TYPE_CHECKING:
-    from arorm import Model, ORM
+    from core.orm import Model, ORM
 
 T = TypeVar('T')
 
@@ -21,6 +22,7 @@ class Store:
     events: events.EventEmitter
 
     def __init__(self, config=None):
+        self.lock = gevent.lock.Semaphore()
         self.clear()
         self.run_after_commit_callbacks = []
         if config:

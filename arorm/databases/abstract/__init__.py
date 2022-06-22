@@ -54,6 +54,9 @@ class StoreQuery(typing.Generic[T]):
     def get(self, id) -> T:
         pass
 
+    def make_aql(self) -> str:
+        pass
+
     def all(self) -> typing.List[T]:
         pass
 

@@ -520,16 +520,11 @@ class ModelPropertyAccessor(Filterable):
         return instance._properties[self._name]
 
     def __set__(self, instance, value):
-        if value is None:
-            data = self.get_data(instance)
-            data[self._name] = None
-            instance._properties[self._name] = None
-        else:
+        prop = self.__get__(instance, None)
+        if prop is None:
+            del instance._properties[self._name]
             prop = self.__get__(instance, None)
-            if prop is None:
-                del instance._properties[self._name]
-                prop = self.__get__(instance, None)
-            prop.set_to(value)
+        prop.set_to(value)
 
     def __init__(self, fields):
         self.kwargs = {}
@@ -562,7 +557,7 @@ class ModelProperty(metaclass=FieldMeta):
 
     @staticmethod
     def from_db(v):
-        return v
+        return v or {}
 
     def get_property_path(self):
         if hasattr(self, '_property_path_parent'):
@@ -577,10 +572,12 @@ class ModelProperty(metaclass=FieldMeta):
         raise Exception('not implemented')
 
     def set_to(self, value):
-        raise Exception('not implemented')
-
-    def reset(self):
-        self._data.clear()
+        if value is None:
+            self._data = None
+        else:
+            for name, f in self._fields.items():
+                self._data[name] = None
+            self._data.update(value)
         self._dirty.add(self._property_key)
 
     def __init__(self, data=None, parent=None, name=None, store=None, **kwargs):
@@ -629,12 +626,15 @@ class ModelProperty(metaclass=FieldMeta):
             if x.startswith(self._property_key + '.'):
                 changes.add(x.replace(self._property_key + '.', '').split('.')[0])
 
-        d = self._data
-        if not d:
-            return d
-        for key in d.keys():
+        if not self._data:
+            return self._data
+
+        for key, field in self._fields.items():
             if changes_only and key not in changes: continue
-            x = d[key]
+            x = getattr(self, key)
+            x = field.to_db(x)
+            if x is None and not field.nullable:
+                raise Exception('field {} on {} not nullable'.format(key, self.__class__.__name__))
             if hasattr(x, '_dump'):
                 data[key] = x._dump(changes_only=changes_only)
             else:
